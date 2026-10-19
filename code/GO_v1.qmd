@@ -1,0 +1,194 @@
+---
+title: "GO pipeline v1" 
+subtitle: "scRNAseq pipeline + GO (ORA and GSEA)" 
+author: "Corentin OSTA"
+format: 
+  html:
+    toc: true            
+    toc-depth: 3         
+    toc-location: left   
+    number-sections: true 
+    embed-resources: true
+    code-copy: true     
+    code-link: true    
+    code-fold: show        
+editor: visual
+---
+
+# Base Pipeline
+
+## Setup & Librairies
+```{r}
+set.seed(42)
+
+suppressPackageStartupMessages({
+  library(Seurat)
+  library(dplyr)
+  library(ggplot2)
+  library(SingleCellExperiment)
+  library(scDblFinder)
+  library(clusterProfiler)
+  library(org.Mm.eg.db)
+  library(enrichplot)
+})
+
+sample.name <- "brain_E18"
+```
+## Import, QC, Filtration
+
+```{r}
+scmat <- Read10X("../data/raw_feature_bc_matrix")
+
+sobj <- CreateSeuratObject(
+  counts = scmat,
+  min.cells = 5,
+  min.features = 200,
+  project = sample.name
+)
+rm(scmat)
+invisible(gc())
+
+sobj$percent_mt <- PercentageFeatureSet(sobj, pattern = "^mt-")
+
+sobj_filtrd <- subset(
+  sobj,
+  subset = nFeature_RNA > 900 & nCount_RNA > 900 & percent_mt < 15
+)
+rm(sobj)
+
+sceobj <- as.SingleCellExperiment(sobj_filtrd)
+doublet_res <- scDblFinder(sceobj, verbose = FALSE)
+sobj_filtrd$doublets.class <- doublet_res$scDblFinder.class
+sobj_filtrd <- subset(sobj_filtrd, subset = doublets.class == "singlet")
+rm(sceobj, doublet_res)
+invisible(gc())
+```
+## Normalisation, PCA, Clustering, UMAP
+
+```{r}
+DefaultAssay(sobj_filtrd) <- "RNA"
+
+sobj_filtrd <- NormalizeData(sobj_filtrd, normalization.method = "LogNormalize", verbose = FALSE)
+sobj_filtrd <- FindVariableFeatures(sobj_filtrd, selection.method = "vst", nfeatures = 2000, verbose = FALSE)
+sobj_filtrd <- ScaleData(sobj_filtrd, verbose = FALSE)
+sobj_filtrd <- RunPCA(sobj_filtrd, features = VariableFeatures(sobj_filtrd), verbose = FALSE)
+
+nPC <- 14
+sobj_filtrd <- FindNeighbors(sobj_filtrd, dims = 1:nPC, verbose = FALSE)
+sobj_filtrd <- FindClusters(sobj_filtrd, resolution = 0.2, verbose = FALSE)
+sobj_filtrd <- RunUMAP(sobj_filtrd, dims = 1:nPC, verbose = FALSE)
+
+Idents(sobj_filtrd) <- "RNA_snn_res.0.2"
+
+# Visualisation des marqueurs du cours pour repérer les populations
+marker_genes <- list(
+  Radial_glia     = c("Pax6", "Sox2", "Hes5", "Fabp7", "Nes"),
+  Interm_prog     = c("Eomes", "Neurog2", "Insm1"),
+  Cycling         = c("Mki67", "Top2a", "Pcna"),
+  Immature_neuron = c("Dcx", "Stmn2", "Neurod2", "Neurod6"),
+  Excitatory      = c("Satb2", "Bcl11b", "Slc17a7"),
+  Inhibitory      = c("Gad1", "Gad2", "Dlx1", "Dlx2"),
+  Astro_precursor = c("Gfap", "Aldh1l1", "Apoe"),
+  OPC             = c("Olig1", "Olig2", "Pdgfra"),
+  Microglia       = c("Aif1", "Cx3cr1", "C1qa"),
+  Vascular        = c("Cldn5", "Pdgfrb", "Col1a1"),
+  Erythroid       = c("Hba-a1", "Hba-a2", "Car2")
+)
+marker_genes <- lapply(marker_genes, function(vec) intersect(vec, rownames(sobj_filtrd)))
+
+p_umap <- DimPlot(sobj_filtrd, reduction = "umap", label = TRUE) + NoLegend()
+p_dot <- DotPlot(sobj_filtrd, features = marker_genes) +
+  theme(axis.text.x = element_text(angle = 45, vjust = 0.5, hjust = 1),
+        strip.text = element_text(angle = 45, hjust = 0.5))
+print(p_umap)
+print(p_dot)
+```
+# GO Enrichment - Part 1 : ORA 
+```{r}
+# Identification des marqueurs positifs de tous les clusters
+result.DE <- FindAllMarkers(sobj_filtrd, min.pct = 0.2, only.pos = TRUE, verbose = FALSE)
+
+# Sélection d'un cluster d'intérêt (ex: Cluster 0, ou modifier selon le DotPlot)
+target_cluster <- "0"
+
+ora_genes <- result.DE %>%
+  filter(cluster == target_cluster, p_val_adj < 0.05, avg_log2FC > 0.5) %>%
+  pull(gene)
+
+# Univers de fond : tous les gènes détectés dans l'objet Seurat
+bg_genes <- rownames(sobj_filtrd)
+
+ego_ora <- enrichGO(
+  gene          = ora_genes,
+  universe      = bg_genes,
+  OrgDb         = org.Mm.eg.db,
+  keyType       = "SYMBOL",
+  ont           = "BP",
+  pAdjustMethod = "BH",
+  pvalueCutoff  = 0.05,
+  qvalueCutoff  = 0.05
+)
+
+# Réduction de la redondance des termes GO
+ego_ora_simp <- simplify(ego_ora, cutoff = 0.7, by = "p.adjust", select_fun = min)
+
+# Visualisations ORA
+dotplot(ego_ora_simp, showCategory = 15) +
+  ggtitle(paste("ORA - GO Biological Process (Cluster", target_cluster, ")"))
+
+ego_ora_simp <- pairwise_termsim(ego_ora_simp)
+emapplot(ego_ora_simp, showCategory = 15)
+```
+#GO Enrichment - Part 2 : GSEA
+```{r}
+# Pour la GSEA, on extrait TOUS les gènes sans filtre de log2FC (logfc.threshold = 0)
+# Option A : Cluster cible contre le reste des cellules (ident.2 = NULL)
+# Option B : Comparaison directe entre 2 clusters (ex: progéniteurs vs neurones matures)
+gsea_de <- FindMarkers(
+  sobj_filtrd,
+  ident.1 = target_cluster,
+  ident.2 = NULL,
+  logfc.threshold = 0,
+  min.pct = 0.05,
+  verbose = FALSE
+)
+
+# Création du vecteur nommé et trié par ordre décroissant de avg_log2FC
+gene_list <- gsea_de$avg_log2FC
+names(gene_list) <- rownames(gsea_de)
+gene_list <- sort(gene_list, decreasing = TRUE)
+
+gse_res <- gseGO(
+  geneList      = gene_list,
+  OrgDb         = org.Mm.eg.db,
+  keyType       = "SYMBOL",
+  ont           = "BP",
+  minGSSize     = 15,
+  maxGSSize     = 500,
+  pvalueCutoff  = 0.05,
+  pAdjustMethod = "BH",
+  eps           = 0,
+  verbose       = FALSE
+)
+
+# Visualisations GSEA : séparation des voies activées (NES > 0) et réprimées (NES < 0)
+dotplot(gse_res, showCategory = 10, split = ".sign") +
+  facet_grid(. ~ .sign) +
+  ggtitle(paste("GSEA - GO Biological Process (Cluster", target_cluster, ")"))
+
+# Courbe d'enrichissement (Running Score) sur le top pathway
+gseaplot2(gse_res, geneSetID = 1, title = gse_res$Description[1])
+```
+
+
+
+#   Save
+```{r}
+
+```
+
+# Session info
+
+```{r}
+sessionInfo()
+```
