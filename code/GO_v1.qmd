@@ -17,9 +17,28 @@ editor: visual
 
 # Base Pipeline
 
-## Setup & Librairies
+## Setup & Environment
+
 ```{r}
 set.seed(42)
+if (basename(getwd()) == "code") setwd("..")
+
+cran_pkgs <- c("Seurat", "dplyr", "ggplot2", "scales", "remotes")
+bioc_pkgs <- c("SingleCellExperiment", "scDblFinder", "clusterProfiler", "org.Mm.eg.db", "enrichplot")
+
+if (!requireNamespace("BiocManager", quietly = TRUE)) install.packages("BiocManager")
+
+
+for (pkg in cran_pkgs) {
+  if (!requireNamespace(pkg, quietly = TRUE)) install.packages(pkg)
+}
+for (pkg in bioc_pkgs) {
+  if (!requireNamespace(pkg, quietly = TRUE)) BiocManager::install(pkg, update = FALSE, ask = FALSE)
+}
+# Optional C++ acceleration for Seurat Wilcoxon test
+if (!requireNamespace("presto", quietly = TRUE)) {
+  try(remotes::install_github("immunogenomics/presto", upgrade = "never", quiet = TRUE), silent = TRUE)
+}
 
 suppressPackageStartupMessages({
   library(Seurat)
@@ -31,56 +50,92 @@ suppressPackageStartupMessages({
   library(org.Mm.eg.db)
   library(enrichplot)
 })
-
+```
+## Directory Setup
+```{r}
 sample.name <- "brain_E18"
+plot_dir    <- "plots"
+cache_dir   <- "data"
+
+if (!dir.exists(plot_dir))  dir.create(plot_dir, recursive = TRUE)
+if (!dir.exists(cache_dir)) dir.create(cache_dir, recursive = TRUE)
+
+# Automatically locate the 10x matrix whether working directory is root or subfolder
+if (dir.exists("data/raw_feature_bc_matrix")) {
+  data_dir <- "data/raw_feature_bc_matrix"
+} else if (dir.exists("../data/raw_feature_bc_matrix")) {
+  data_dir <- "../data/raw_feature_bc_matrix"
+} else {
+  stop(
+    "Count matrix not found! Since 'data/' is git-ignored, please place ",
+    "'raw_feature_bc_matrix' inside the 'data/' folder.\n",
+    "Download link: https://www.10xgenomics.com/datasets/10-k-brain-cells-from-an-e-18-mouse-v-3-chemistry-3-standard-3-0-0"
+  )
+}
 ```
-## Import, QC, Filtration
+
+
+## Base Pipeline Execution
 
 ```{r}
-scmat <- Read10X("../data/raw_feature_bc_matrix")
+sobj_cache_file <- file.path(cache_dir, "sobj_processed.rds")
+de_cache_file   <- file.path(cache_dir, "result_DE.rds")
 
-sobj <- CreateSeuratObject(
-  counts = scmat,
-  min.cells = 5,
-  min.features = 200,
-  project = sample.name
-)
-rm(scmat)
-invisible(gc())
+if (file.exists(sobj_cache_file) && file.exists(de_cache_file)) {
+  message("Loading pre-computed Seurat object and DE table from 'data/'...")
+  sobj_filtrd <- readRDS(sobj_cache_file)
+  result.DE   <- readRDS(de_cache_file)
+} else {
+  message("Running base pipeline from scratch (results will be cached in 'data/')...")
 
-sobj$percent_mt <- PercentageFeatureSet(sobj, pattern = "^mt-")
+  # Import & Initial Seurat Object
+  scmat <- Read10X(data_dir)
+  sobj  <- CreateSeuratObject(counts = scmat, min.cells = 5, min.features = 200, project = sample.name)
+  rm(scmat); invisible(gc())
 
-sobj_filtrd <- subset(
-  sobj,
-  subset = nFeature_RNA > 900 & nCount_RNA > 900 & percent_mt < 15
-)
-rm(sobj)
+  # Quality Control & Doublet Removal
+  sobj$percent_mt <- PercentageFeatureSet(sobj, pattern = "^mt-")
+  p_qc <- VlnPlot(sobj, features = c("nFeature_RNA", "nCount_RNA", "percent_mt"), ncol = 3, pt.size = 0)
+  ggsave(file.path(plot_dir, "01_QC_violin_raw.png"), plot = p_qc, width = 10, height = 5, dpi = 300)
 
-sceobj <- as.SingleCellExperiment(sobj_filtrd)
-doublet_res <- scDblFinder(sceobj, verbose = FALSE)
-sobj_filtrd$doublets.class <- doublet_res$scDblFinder.class
-sobj_filtrd <- subset(sobj_filtrd, subset = doublets.class == "singlet")
-rm(sceobj, doublet_res)
-invisible(gc())
+  sobj_filtrd <- subset(sobj, subset = nFeature_RNA > 900 & nCount_RNA > 900 & percent_mt < 15)
+  rm(sobj); invisible(gc())
+
+  suppressWarnings({
+    sceobj      <- as.SingleCellExperiment(sobj_filtrd)
+    doublet_res <- scDblFinder(sceobj, verbose = FALSE)
+  })
+  sobj_filtrd$doublets.class <- doublet_res$scDblFinder.class
+  sobj_filtrd <- subset(sobj_filtrd, subset = doublets.class == "singlet")
+  rm(sceobj, doublet_res); invisible(gc())
+
+  # Normalization, PCA, Clustering & UMAP
+  DefaultAssay(sobj_filtrd) <- "RNA"
+  sobj_filtrd <- NormalizeData(sobj_filtrd, normalization.method = "LogNormalize", verbose = FALSE)
+  sobj_filtrd <- FindVariableFeatures(sobj_filtrd, selection.method = "vst", nfeatures = 2000, verbose = FALSE)
+  sobj_filtrd <- ScaleData(sobj_filtrd, verbose = FALSE)
+  sobj_filtrd <- RunPCA(sobj_filtrd, features = VariableFeatures(sobj_filtrd), verbose = FALSE)
+
+  nPC <- 14
+  sobj_filtrd <- FindNeighbors(sobj_filtrd, dims = 1:nPC, verbose = FALSE)
+  sobj_filtrd <- FindClusters(sobj_filtrd, resolution = 0.2, verbose = FALSE)
+  sobj_filtrd <- RunUMAP(sobj_filtrd, dims = 1:nPC, verbose = FALSE)
+  Idents(sobj_filtrd) <- "RNA_snn_res.0.2"
+
+  # Differential Expression
+  result.DE <- FindAllMarkers(sobj_filtrd, min.pct = 0.2, only.pos = TRUE, verbose = TRUE)
+
+  # Save cache locally (ignored by git via 'data/' rule)
+  saveRDS(sobj_filtrd, sobj_cache_file)
+  saveRDS(result.DE, de_cache_file)
+}
 ```
-## Normalisation, PCA, Clustering, UMAP
-
+# Base Pipeline Visualisation
 ```{r}
-DefaultAssay(sobj_filtrd) <- "RNA"
+p_umap <- DimPlot(sobj_filtrd, reduction = "umap", label = TRUE, pt.size = 0.3) +
+  ggtitle("UMAP - E18 Mouse Brain Clusters (res = 0.2)")
+ggsave(file.path(plot_dir, "02_UMAP_clusters.png"), plot = p_umap, width = 7, height = 5, dpi = 300)
 
-sobj_filtrd <- NormalizeData(sobj_filtrd, normalization.method = "LogNormalize", verbose = FALSE)
-sobj_filtrd <- FindVariableFeatures(sobj_filtrd, selection.method = "vst", nfeatures = 2000, verbose = FALSE)
-sobj_filtrd <- ScaleData(sobj_filtrd, verbose = FALSE)
-sobj_filtrd <- RunPCA(sobj_filtrd, features = VariableFeatures(sobj_filtrd), verbose = FALSE)
-
-nPC <- 14
-sobj_filtrd <- FindNeighbors(sobj_filtrd, dims = 1:nPC, verbose = FALSE)
-sobj_filtrd <- FindClusters(sobj_filtrd, resolution = 0.2, verbose = FALSE)
-sobj_filtrd <- RunUMAP(sobj_filtrd, dims = 1:nPC, verbose = FALSE)
-
-Idents(sobj_filtrd) <- "RNA_snn_res.0.2"
-
-# Visualisation des marqueurs du cours pour repérer les populations
 marker_genes <- list(
   Radial_glia     = c("Pax6", "Sox2", "Hes5", "Fabp7", "Nes"),
   Interm_prog     = c("Eomes", "Neurog2", "Insm1"),
@@ -96,28 +151,38 @@ marker_genes <- list(
 )
 marker_genes <- lapply(marker_genes, function(vec) intersect(vec, rownames(sobj_filtrd)))
 
-p_umap <- DimPlot(sobj_filtrd, reduction = "umap", label = TRUE) + NoLegend()
-p_dot <- DotPlot(sobj_filtrd, features = marker_genes) +
+p_dot_markers <- DotPlot(sobj_filtrd, features = marker_genes) +
   theme(axis.text.x = element_text(angle = 45, vjust = 0.5, hjust = 1),
-        strip.text = element_text(angle = 45, hjust = 0.5))
-print(p_umap)
-print(p_dot)
+        strip.text  = element_text(angle = 45, hjust = 0.5),
+        plot.background = element_rect(fill = "white", color = NA))
+ggsave(file.path(plot_dir, "03_DotPlot_canonical_markers.png"), plot = p_dot_markers, width = 14, height = 6, dpi = 300)
+
+top.DE <- result.DE %>% group_by(cluster) %>% slice_max(order_by = avg_log2FC, n = 5)
+p_heatmap <- DoHeatmap(sobj_filtrd, slot = "data", features = unique(top.DE$gene), size = 3)
+ggsave(file.path(plot_dir, "04_Heatmap_topDE.png"), plot = p_heatmap, width = 12, height = 8, dpi = 300)
 ```
-# GO Enrichment - Part 1 : ORA 
+
+
+
+# Functional Enrichment Analysis (ORA & GSEA)
 ```{r}
-# Identification des marqueurs positifs de tous les clusters
-result.DE <- FindAllMarkers(sobj_filtrd, min.pct = 0.2, only.pos = TRUE, verbose = FALSE)
-
-# Sélection d'un cluster d'intérêt (ex: Cluster 0, ou modifier selon le DotPlot)
+# Select target cluster ID and validate its existence
 target_cluster <- "0"
+stopifnot("Target cluster not found in Seurat object!" = target_cluster %in% levels(Idents(sobj_filtrd)))
+```
 
+## Over-Representation Analysis (ORA)
+Threshold-based hypergeometric test comparing significant DE markers against all genes detected in the experiment.
+```{r}
+# 1. Filter significant upregulated genes (FDR < 0.05 & log2FC > 0.5)
 ora_genes <- result.DE %>%
   filter(cluster == target_cluster, p_val_adj < 0.05, avg_log2FC > 0.5) %>%
   pull(gene)
 
-# Univers de fond : tous les gènes détectés dans l'objet Seurat
+# 2. Define background universe as all detected genes in the dataset (avoids tissue bias)
 bg_genes <- rownames(sobj_filtrd)
 
+# 3. Run ORA on GO Biological Processes (BP) with Benjamini-Hochberg FDR control
 ego_ora <- enrichGO(
   gene          = ora_genes,
   universe      = bg_genes,
@@ -129,35 +194,44 @@ ego_ora <- enrichGO(
   qvalueCutoff  = 0.05
 )
 
-# Réduction de la redondance des termes GO
-ego_ora_simp <- simplify(ego_ora, cutoff = 0.7, by = "p.adjust", select_fun = min)
+# 4. Collapse redundant GO terms sharing >70% gene overlap and export plots
+if (!is.null(ego_ora) && nrow(ego_ora@result %>% filter(p.adjust < 0.05)) > 0) {
+  ego_ora_simp <- simplify(ego_ora, cutoff = 0.7, by = "p.adjust", select_fun = min)
 
-# Visualisations ORA
-dotplot(ego_ora_simp, showCategory = 15) +
-  ggtitle(paste("ORA - GO Biological Process (Cluster", target_cluster, ")"))
+  p_ora_dot <- dotplot(ego_ora_simp, showCategory = 15) +
+    ggtitle(paste("ORA - GO Biological Process (Cluster", target_cluster, ")"))
+  ggsave(file.path(plot_dir, "05_ORA_dotplot.png"), plot = p_ora_dot, width = 9, height = 7, dpi = 300)
 
-ego_ora_simp <- pairwise_termsim(ego_ora_simp)
-emapplot(ego_ora_simp, showCategory = 15)
+  ego_ora_simp <- pairwise_termsim(ego_ora_simp)
+  p_ora_emap <- emapplot(ego_ora_simp, showCategory = 15) +
+    ggtitle(paste("ORA Functional Network (Cluster", target_cluster, ")"))
+  ggsave(file.path(plot_dir, "06_ORA_emapplot.png"), plot = p_ora_emap, width = 9, height = 8, dpi = 300, bg = "white")
+} else {
+  warning("No significant GO terms found via ORA for cluster ", target_cluster)
+}
 ```
-#GO Enrichment - Part 2 : GSEA
+
+#Gene Set Enrichment Analysis (GSEA)
+Threshold-free random-walk test evaluating whether pathway genes accumulate at the top (activated, NES > 0) or bottom (suppressed, NES < 0) of a ranked list.
 ```{r}
-# Pour la GSEA, on extrait TOUS les gènes sans filtre de log2FC (logfc.threshold = 0)
-# Option A : Cluster cible contre le reste des cellules (ident.2 = NULL)
-# Option B : Comparaison directe entre 2 clusters (ex: progéniteurs vs neurones matures)
+# 1. Compute unfiltered fold-changes (logfc.threshold = 0, both up & down genes)
+#    min.pct = 0.05 removes extreme dropout noise (<5% expressing cells)
 gsea_de <- FindMarkers(
   sobj_filtrd,
-  ident.1 = target_cluster,
-  ident.2 = NULL,
+  ident.1         = target_cluster,
+  ident.2         = NULL,
   logfc.threshold = 0,
-  min.pct = 0.05,
-  verbose = FALSE
+  min.pct         = 0.05,
+  verbose         = TRUE
 )
 
-# Création du vecteur nommé et trié par ordre décroissant de avg_log2FC
+# 2. Rank all tested genes continuously by decreasing avg_log2FC
 gene_list <- gsea_de$avg_log2FC
 names(gene_list) <- rownames(gsea_de)
 gene_list <- sort(gene_list, decreasing = TRUE)
 
+# 3. Fix seed before permutation testing and run GSEA (gene set size: 15 to 500)
+set.seed(42)
 gse_res <- gseGO(
   geneList      = gene_list,
   OrgDb         = org.Mm.eg.db,
@@ -168,21 +242,26 @@ gse_res <- gseGO(
   pvalueCutoff  = 0.05,
   pAdjustMethod = "BH",
   eps           = 0,
+  #nPermSimple   = 10000, ??
   verbose       = FALSE
 )
 
-# Visualisations GSEA : séparation des voies activées (NES > 0) et réprimées (NES < 0)
-dotplot(gse_res, showCategory = 10, split = ".sign") +
-  facet_grid(. ~ .sign) +
-  ggtitle(paste("GSEA - GO Biological Process (Cluster", target_cluster, ")"))
+# 4. Export GSEA split DotPlot and top pathway Running Enrichment Score curve
+if (!is.null(gse_res) && nrow(gse_res@result) > 0) {
+  p_gsea_dot <- dotplot(gse_res, showCategory = 10, split = ".sign") +
+    facet_grid(. ~ .sign) +
+    ggtitle(paste("GSEA - Activated vs Suppressed Pathways (Cluster", target_cluster, ")"))
+  ggsave(file.path(plot_dir, "07_GSEA_dotplot.png"), plot = p_gsea_dot, width = 11, height = 7, dpi = 300)
 
-# Courbe d'enrichissement (Running Score) sur le top pathway
-gseaplot2(gse_res, geneSetID = 1, title = gse_res$Description[1])
+  p_gsea_curve <- gseaplot2(gse_res, geneSetID = 1, title = gse_res$Description[1])
+  ggsave(file.path(plot_dir, "08_GSEA_running_score.png"), plot = p_gsea_curve, width = 9, height = 6, dpi = 300, bg = "white")
+} else {
+  warning("No significant GO terms found via GSEA for cluster ", target_cluster)
+}
 ```
 
+# Save
 
-
-#   Save
 ```{r}
 
 ```
