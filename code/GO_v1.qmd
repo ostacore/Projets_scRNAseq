@@ -51,7 +51,9 @@ suppressPackageStartupMessages({
   library(enrichplot)
 })
 ```
+
 ## Directory Setup
+
 ```{r}
 sample.name <- "brain_E18"
 plot_dir    <- "plots"
@@ -73,7 +75,6 @@ if (dir.exists("data/raw_feature_bc_matrix")) {
   )
 }
 ```
-
 
 ## Base Pipeline Execution
 
@@ -130,7 +131,9 @@ if (file.exists(sobj_cache_file) && file.exists(de_cache_file)) {
   saveRDS(result.DE, de_cache_file)
 }
 ```
+
 # Base Pipeline Visualisation
+
 ```{r}
 p_umap <- DimPlot(sobj_filtrd, reduction = "umap", label = TRUE, pt.size = 0.3) +
   ggtitle("UMAP - E18 Mouse Brain Clusters (res = 0.2)")
@@ -162,9 +165,8 @@ p_heatmap <- DoHeatmap(sobj_filtrd, slot = "data", features = unique(top.DE$gene
 ggsave(file.path(plot_dir, "04_Heatmap_topDE.png"), plot = p_heatmap, width = 12, height = 8, dpi = 300)
 ```
 
-
-
 # Functional Enrichment Analysis (ORA & GSEA)
+
 ```{r}
 # Select target cluster ID and validate its existence
 target_cluster <- "0"
@@ -172,7 +174,9 @@ stopifnot("Target cluster not found in Seurat object!" = target_cluster %in% lev
 ```
 
 ## Over-Representation Analysis (ORA)
+
 Threshold-based hypergeometric test comparing significant DE markers against all genes detected in the experiment.
+
 ```{r}
 # 1. Filter significant upregulated genes (FDR < 0.05 & log2FC > 0.5)
 ora_genes <- result.DE %>%
@@ -211,8 +215,27 @@ if (!is.null(ego_ora) && nrow(ego_ora@result %>% filter(p.adjust < 0.05)) > 0) {
 }
 ```
 
-#Gene Set Enrichment Analysis (GSEA)
-Threshold-free random-walk test evaluating whether pathway genes accumulate at the top (activated, NES > 0) or bottom (suppressed, NES < 0) of a ranked list.
+## Gene Set Enrichment Analysis (GSEA)
+
+**Objectives** : ORA (previous section) only looks at a list of genes selected with arbitrary cutoffs (FDR \< 0.05, log2FC \> 0.5). Every gene is either "in" or "out" of the list. Genes just below the cutoff are ignored, and so are coordinated but modest changes across many genes of the same pathway. GSEA (Subramanian *et al.*, PNAS 2005) does not use a threshold: it uses **all** the tested genes, ranked from the most up-regulated to the most down-regulated in the target cluster.
+
+The principle :
+
+-   genes are ranked by a statistic (here the `avg_log2FC` of the target cluster against all the other cells)
+-   for each GO term, we walk down the ranked list. A running *Enrichment Score* (ES) goes up each time we meet a gene of the term and goes down otherwise. The ES is the maximum deviation from zero.
+-   the ES is normalized for the size of the gene set, which gives the **NES** (*Normalized Enrichment Score*)
+    -   NES \> 0 : the genes of the term are at the top of the list (**activated** in the target cluster)
+    -   NES \< 0 : the genes of the term are at the bottom of the list (**suppressed** in the target cluster)
+-   the significance is estimated by permutations (`fgsea` algorithm), then corrected for multiple testing (Benjamini-Hochberg)
+
+We use the function `gseGO` from the `clusterProfiler` package (https://yulab-smu.top/biomedical-knowledge-mining-book/).
+
+### Build the ranked gene list
+
+Recompute the differential expression between the target cluster and all the other cells, without any filter on the fold-change (`logfc.threshold = 0`). Up and down genes are both kept. We only remove the genes detected in less than 5% of the cells (`min.pct = 0.05`): their fold-change is dominated by dropout noise.
+
+Run the code below (it can take a few minutes !)
+
 ```{r}
 # 1. Compute unfiltered fold-changes (logfc.threshold = 0, both up & down genes)
 #    min.pct = 0.05 removes extreme dropout noise (<5% expressing cells)
@@ -225,11 +248,44 @@ gsea_de <- FindMarkers(
   verbose         = TRUE
 )
 
+# number of tested genes and distribution of the fold-changes
+nrow(gsea_de)
+summary(gsea_de$avg_log2FC)
+```
+
+`gseGO` expects a **named numeric vector**, sorted in decreasing order. The values are the statistic and the names are the gene symbols.
+
+```{r}
 # 2. Rank all tested genes continuously by decreasing avg_log2FC
 gene_list <- gsea_de$avg_log2FC
 names(gene_list) <- rownames(gsea_de)
 gene_list <- sort(gene_list, decreasing = TRUE)
 
+# top and bottom of the ranked list
+head(gene_list, 10)
+tail(gene_list, 10)
+```
+
+We rank `r scales::comma(length(gene_list))` genes.
+
+**Question** : look at the genes at the top and at the bottom of the list. Do they match the cell type you assigned to cluster `r target_cluster` with the canonical markers (DotPlot) ?
+
+Be aware: the ranking statistic is a choice. `avg_log2FC` measures the size of the effect but does not take its significance into account. A common alternative is `sign(avg_log2FC) * -log10(p_val)`. With thousands of cells, however, many p-values are equal to 0 and have to be capped. Both approaches are used in practice, and you can compare them.
+
+### Run GSEA on GO Biological Processes
+
+The main parameters :
+
+-   `ont = "BP"` : we test the *Biological Process* ontology (alternatives : `"MF"`, `"CC"` or `"ALL"`)
+-   `keyType = "SYMBOL"` : our genes are named by their symbols (the rownames of the Seurat object)
+-   `minGSSize = 15`, `maxGSSize = 500` : very small terms are unstable and very large terms are too general to interpret, so both are excluded
+-   `pvalueCutoff = 0.05` : threshold applied to the **adjusted** p-value (`pAdjustMethod = "BH"`)
+-   `eps = 0` : the p-values are estimated exactly, even very small ones (by default they are bounded at 1e-10)
+-   `nPermSimple` : number of permutations of the first step of `fgsea` (1000 by default). Only increase it (e.g. 10000) if `fgsea` warns about *"unbalanced gene-level statistic values"*.
+
+The test is based on random permutations, so we fix the seed for reproducibility.
+
+```{r}
 # 3. Fix seed before permutation testing and run GSEA (gene set size: 15 to 500)
 set.seed(42)
 gse_res <- gseGO(
@@ -242,23 +298,55 @@ gse_res <- gseGO(
   pvalueCutoff  = 0.05,
   pAdjustMethod = "BH",
   eps           = 0,
-  #nPermSimple   = 10000, ??
+  #nPermSimple   = 10000,
   verbose       = FALSE
 )
 
+# most significant terms and number of activated / suppressed terms
+head(gse_res@result[, c("Description", "setSize", "NES", "p.adjust")], 10)
+table(ifelse(gse_res@result$NES > 0, "activated", "suppressed"))
+```
+
+The results are stored in `gse_res@result`. In particular :
+
+-   `setSize` : number of genes of the term found in our ranked list
+-   `NES` : normalized enrichment score (its sign gives the direction)
+-   `p.adjust` : BH-adjusted p-value
+-   `core_enrichment` : the *leading edge*, i.e. the genes that contribute the most to the enrichment score. These are the genes to look at to interpret a term.
+
+### Visualisation
+
+-   **DotPlot** : the terms are split into activated (NES \> 0) and suppressed (NES \< 0). The x-axis (`GeneRatio`) is the fraction of the term's genes that belong to the leading edge. The size of the dots is the number of leading-edge genes and the colour is the adjusted p-value.
+-   **Running Enrichment Score** (most significant term) :
+    -   top panel : the running ES along the ranked list. The peak (or the trough) gives the ES.
+    -   middle panel : each vertical bar is a gene of the term. Bars concentrated on the left mean activation, bars on the right mean suppression.
+    -   bottom panel : the value of the ranking statistic (`avg_log2FC`) along the list.
+
+```{r}
+#| fig-width: 11
+#| fig-height: 7
 # 4. Export GSEA split DotPlot and top pathway Running Enrichment Score curve
 if (!is.null(gse_res) && nrow(gse_res@result) > 0) {
   p_gsea_dot <- dotplot(gse_res, showCategory = 10, split = ".sign") +
     facet_grid(. ~ .sign) +
     ggtitle(paste("GSEA - Activated vs Suppressed Pathways (Cluster", target_cluster, ")"))
   ggsave(file.path(plot_dir, "07_GSEA_dotplot.png"), plot = p_gsea_dot, width = 11, height = 7, dpi = 300)
+  print(p_gsea_dot)
 
   p_gsea_curve <- gseaplot2(gse_res, geneSetID = 1, title = gse_res$Description[1])
   ggsave(file.path(plot_dir, "08_GSEA_running_score.png"), plot = p_gsea_curve, width = 9, height = 6, dpi = 300, bg = "white")
+  print(p_gsea_curve)
 } else {
   warning("No significant GO terms found via GSEA for cluster ", target_cluster)
 }
 ```
+
+**Question** : which biological processes are activated and which are suppressed in cluster `r target_cluster` ? Are they consistent with the ORA results and with the cell type you identified ?
+
+Be aware:
+
+-   we compare the target cluster to **all the other cells**, which form a heterogeneous mixture of cell types. A "suppressed" term (e.g. cell division) does not mean the process is switched off. It means that it is **less** active than in the other clusters on average (here, the cycling progenitors).
+-   GO terms are highly redundant (e.g. *nuclear division*, *mitotic nuclear division*, *chromosome segregation*): several significant terms often reflect the same set of genes. As for ORA, `simplify(gse_res, cutoff = 0.7)` can be used to merge them.
 
 # Save
 
