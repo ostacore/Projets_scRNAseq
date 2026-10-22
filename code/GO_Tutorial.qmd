@@ -177,6 +177,12 @@ p_heatmap <- DoHeatmap(sobj_filtrd, slot = "data", features = unique(top.DE$gene
 ggsave(file.path(plot_dir, "04_Heatmap_topDE.png"), plot = p_heatmap, width = 12, height = 8, dpi = 300)
 ```
 
+### Cluster Annotation Checkpoint
+
+**Exercise**: Look at the `03_DotPlot_canonical_markers.png` plot. - Can you identify Cluster 0 based on these canonical markers? - Try to annotate the major clusters before moving to the Functional Enrichment Analysis.
+
+**Keep your manual annotation in mind to see if the unbiased GO analysis confirms it!**
+
 # Functional Enrichment Analysis (ORA & GSEA)
 
 ## Introduction
@@ -279,11 +285,13 @@ The **Enrichment Map** (*06_ORA_emapplot.png*): This network connects GO terms t
 
 ### Exercise:
 
-*Q1 :* Open the *ORA DotPlot* for Cluster 3. Does the biological process match the annotation you gave to this cluster earlier? –\> IMPLémentation Annotation Manuelle !!
+### Exercise:
 
-*Q2 :* Change the ORA_ONTOLOGY parameter to "CC" (Cellular Component) in the code block above, re-run the chunk, and check the new plots. Where in the cell are the proteins of this cluster acting (e.g., synapse, nucleus)? –\> avant annotation manuelle !!
+*Q1 :* Open the *ORA DotPlot* for your targeted cluster (e.g., Cluster 0). Do the Biological Processes (BP) listed match the manual annotation you deduced earlier? (e.g., if you annotated it as Radial Glia, do you see terms related to cell cycle or neurogenesis?)
 
-*Q3 :* Try changing the ORA_DIRECTION parameter to "DOWN" to study the repressed genes. What functions has this cluster "turned off" compared to the rest of the brain?
+*Q2 :* Change the `ORA_ONTOLOGY` parameter to `"CC"` (Cellular Component) in the code block above, re-run the chunk, and check the new plots. How does the physical location of the proteins (e.g., nucleus, mitotic spindle, or synaptic membrane) support your biological conclusion from Q1?
+
+*Q3 :* Try changing the `ORA_DIRECTION` parameter to `"DOWN"` to study the repressed genes. What specific functions has this cluster "turned off" to commit to its current cellular state?
 
 ## Gene Set Enrichment Analysis (GSEA)
 
@@ -421,7 +429,14 @@ Be aware:
 # Save
 
 ```{r}
-
+# Save ORA and GSEA outputs for future reference
+if (exists("ego_ora") && !is.null(ego_ora)) {
+  saveRDS(ego_ora, file.path(cache_dir, paste0("ORA_results_cluster", target_cluster, ".rds")))
+}
+if (exists("gse_res") && !is.null(gse_res)) {
+  saveRDS(gse_res, file.path(cache_dir, paste0("GSEA_results_cluster", target_cluster, ".rds")))
+}
+message("Results successfully saved in ", cache_dir)
 ```
 
 # Session info
