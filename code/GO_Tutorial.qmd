@@ -287,11 +287,11 @@ The **Enrichment Map** (*06_ORA_emapplot.png*): This network connects GO terms t
 
 ### Exercise:
 
-*Q1 :* Open the *ORA DotPlot* for your targeted cluster (e.g., Cluster 0). Do the Biological Processes (BP) listed match the manual annotation you deduced earlier? (e.g., if you annotated it as Radial Glia, do you see terms related to cell cycle or neurogenesis?)
+*Q1 :* In the code above, the target_cluster parameter is set to "0". Look at the annotation plot *03_DotPlot_canonical_markers.png*: this cluster strongly expresses markers for immature neurons (Dcx, Stmn2, Neurod2, Neurod6) and excitatory neurons (Satb2). Do the Biological Processes (BP) that emerge on your ORA plot confirm this manually deduced identity?
 
-*Q2 :* Change the `ORA_ONTOLOGY` parameter to `"CC"` (Cellular Component) in the code block above, re-run the chunk, and check the new plots. How does the physical location of the proteins (e.g., nucleus, mitotic spindle, or synaptic membrane) support your biological conclusion from Q1?
+*Q2 :* Change the `ORA_ONTOLOGY` parameter to "CC" (Cellular Component) and re-run the code block. Since *Cluster 0* appears to be composed of differentiating neurons, are the resulting terms (e.g., synapse, axon, or growth cone) consistent with the expected physical location of these proteins?
 
-*Q3 :* Try changing the `ORA_DIRECTION` parameter to `"DOWN"` to study the repressed genes. What specific functions has this cluster "turned off" to commit to its current cellular state?
+*Q3 :* Try changing the `ORA_DIRECTION` parameter to `"DOWN"` to study the genes that *Cluster 0* has repressed. Look at the DotPlot again: clusters like *Cluster 2* strongly express markers for radial glia (Pax6, Sox2) and the cell cycle (Mki67, Top2a, Pcna). Do you find terms related to cell division or stem cell maintenance among the functions that our Cluster 0 had to "turn off" to commit to its neuronal state?
 
 ## Gene Set Enrichment Analysis (GSEA)
 
