@@ -13,9 +13,6 @@ format:
     code-link: true    
     code-fold: show        
 editor: visual
-knitr: 
-  opts_knit: 
-    root.dir: ".."
 ---
 
 # Base Pipeline
@@ -25,7 +22,7 @@ knitr:
 ```{r setup}
 set.seed(42)
 
-cran_pkgs <- c("Seurat", "dplyr", "ggplot2", "scales")
+cran_pkgs <- c("Seurat", "dplyr", "ggplot2", "scales", "here")
 bioc_pkgs <- c("SingleCellExperiment", "scDblFinder", "clusterProfiler", "org.Mm.eg.db", "enrichplot")
 
 if (!requireNamespace("BiocManager", quietly = TRUE)) install.packages("BiocManager")
@@ -53,19 +50,17 @@ suppressPackageStartupMessages({
 
 ```{r}
 sample.name <- "brain_E18"
-plot_dir    <- "plots"
-cache_dir   <- "data"
+# Paths are built from the project root (folder containing the .Rproj) with here::here()
+plot_dir    <- here::here("plots")
+cache_dir   <- here::here("data", "processed_data")
+data_dir    <- here::here("data", "raw_data", "raw_feature_bc_matrix")
 
 if (!dir.exists(plot_dir))  dir.create(plot_dir, recursive = TRUE)
 if (!dir.exists(cache_dir)) dir.create(cache_dir, recursive = TRUE)
 
-if (dir.exists("data/raw_feature_bc_matrix")) {
-  data_dir <- "data/raw_feature_bc_matrix"
-} else if (dir.exists("../data/raw_feature_bc_matrix")) {
-  data_dir <- "../data/raw_feature_bc_matrix"
-} else {
+if (!dir.exists(data_dir)) {
   stop(
-    "Count matrix not found! Please place 'raw_feature_bc_matrix' inside 'data/'.\n",
+    "Count matrix not found! Please place 'raw_feature_bc_matrix' inside 'data/raw_data/'.\n",
     "Download link: [https://www.10xgenomics.com/datasets/10-k-brain-cells-from-an-e-18-mouse-v-3-chemistry-3-standard-3-0-0](https://www.10xgenomics.com/datasets/10-k-brain-cells-from-an-e-18-mouse-v-3-chemistry-3-standard-3-0-0)"
   )
 }
@@ -95,11 +90,11 @@ sobj_cache_file <- file.path(cache_dir, "sobj_processed.rds")
 de_cache_file   <- file.path(cache_dir, "result_DE.rds")
 
 if (file.exists(sobj_cache_file) && file.exists(de_cache_file)) {
-  message("Loading pre-computed Seurat object and DE table from 'data/'...")
+  message("Loading pre-computed Seurat object and DE table from 'data/processed_data/'...")
   sobj_filtrd <- readRDS(sobj_cache_file)
   result.DE   <- readRDS(de_cache_file)
 } else {
-  message("Running base pipeline from scratch (results will be cached in 'data/')...")
+  message("Running base pipeline from scratch (results will be cached in 'data/processed_data/')...")
 
   # Import & Initial Seurat Object
   scmat <- Read10X(data_dir)
@@ -138,7 +133,7 @@ if (file.exists(sobj_cache_file) && file.exists(de_cache_file)) {
   # Differential Expression
   result.DE <- FindAllMarkers(sobj_filtrd, min.pct = DE_MIN_PCT, only.pos = DE_ONLY_POS, verbose = TRUE)
 
-  # Save cache locally (ignored by git via 'data/' rule)
+  # Save cache locally in data/processed_data/ (ignored by git via '/data' rule)
   saveRDS(sobj_filtrd, sobj_cache_file)
   saveRDS(result.DE, de_cache_file)
 }
@@ -299,12 +294,12 @@ The **Enrichment Map** (*06_ORA_emapplot.png*): This network connects GO terms t
 
 The principle :
 
--   genes are ranked by a statistic (here the `avg_log2FC` of the target cluster against all the other cells)
--   for each GO term, we walk down the ranked list. A running *Enrichment Score* (ES) goes up each time we meet a gene of the term and goes down otherwise. The ES is the maximum deviation from zero.
--   the ES is normalized for the size of the gene set, which gives the **NES** (*Normalized Enrichment Score*)
-    -   NES \> 0 : the genes of the term are at the top of the list (**activated** in the target cluster)
-    -   NES \< 0 : the genes of the term are at the bottom of the list (**suppressed** in the target cluster)
--   the significance is estimated by permutations (`fgsea` algorithm), then corrected for multiple testing (Benjamini-Hochberg)
+- genes are ranked by a statistic (here the `avg_log2FC` of the target cluster against all the other cells)
+- for each GO term, we walk down the ranked list. A running *Enrichment Score* (ES) goes up each time we meet a gene of the term and goes down otherwise. The ES is the maximum deviation from zero.
+- the ES is normalized for the size of the gene set, which gives the **NES** (*Normalized Enrichment Score*)
+  - NES \> 0 : the genes of the term are at the top of the list (**activated** in the target cluster)
+  - NES \< 0 : the genes of the term are at the bottom of the list (**suppressed** in the target cluster)
+- the significance is estimated by permutations (`fgsea` algorithm), then corrected for multiple testing (Benjamini-Hochberg)
 
 We use the function `gseGO` from the `clusterProfiler` package (https://yulab-smu.top/biomedical-knowledge-mining-book/).
 
@@ -354,12 +349,12 @@ Be aware: the ranking statistic is a choice. `avg_log2FC` measures the size of t
 
 The main parameters :
 
--   `ont = "BP"` : we test the *Biological Process* ontology (alternatives : `"MF"`, `"CC"` or `"ALL"`)
--   `keyType = "SYMBOL"` : our genes are named by their symbols (the rownames of the Seurat object)
--   `minGSSize = 15`, `maxGSSize = 500` : very small terms are unstable and very large terms are too general to interpret, so both are excluded
--   `pvalueCutoff = 0.05` : threshold applied to the **adjusted** p-value (`pAdjustMethod = "BH"`)
--   `eps = 0` : the p-values are estimated exactly, even very small ones (by default they are bounded at 1e-10)
--   `nPermSimple` : number of permutations of the first step of `fgsea` (1000 by default). Only increase it (e.g. 10000) if `fgsea` warns about *"unbalanced gene-level statistic values"*.
+- `ont = "BP"` : we test the *Biological Process* ontology (alternatives : `"MF"`, `"CC"` or `"ALL"`)
+- `keyType = "SYMBOL"` : our genes are named by their symbols (the rownames of the Seurat object)
+- `minGSSize = 15`, `maxGSSize = 500` : very small terms are unstable and very large terms are too general to interpret, so both are excluded
+- `pvalueCutoff = 0.05` : threshold applied to the **adjusted** p-value (`pAdjustMethod = "BH"`)
+- `eps = 0` : the p-values are estimated exactly, even very small ones (by default they are bounded at 1e-10)
+- `nPermSimple` : number of permutations of the first step of `fgsea` (1000 by default). Only increase it (e.g. 10000) if `fgsea` warns about *"unbalanced gene-level statistic values"*.
 
 The test is based on random permutations, so we fix the seed for reproducibility.
 
@@ -387,18 +382,18 @@ table(ifelse(gse_res@result$NES > 0, "activated", "suppressed"))
 
 The results are stored in `gse_res@result`. In particular :
 
--   `setSize` : number of genes of the term found in our ranked list
--   `NES` : normalized enrichment score (its sign gives the direction)
--   `p.adjust` : BH-adjusted p-value
--   `core_enrichment` : the *leading edge*, i.e. the genes that contribute the most to the enrichment score. These are the genes to look at to interpret a term.
+- `setSize` : number of genes of the term found in our ranked list
+- `NES` : normalized enrichment score (its sign gives the direction)
+- `p.adjust` : BH-adjusted p-value
+- `core_enrichment` : the *leading edge*, i.e. the genes that contribute the most to the enrichment score. These are the genes to look at to interpret a term.
 
 ### Visualisation
 
--   **DotPlot** : the terms are split into activated (NES \> 0) and suppressed (NES \< 0). The x-axis (`GeneRatio`) is the fraction of the term's genes that belong to the leading edge. The size of the dots is the number of leading-edge genes and the colour is the adjusted p-value.
--   **Running Enrichment Score** (most significant term) :
-    -   top panel : the running ES along the ranked list. The peak (or the trough) gives the ES.
-    -   middle panel : each vertical bar is a gene of the term. Bars concentrated on the left mean activation, bars on the right mean suppression.
-    -   bottom panel : the value of the ranking statistic (`avg_log2FC`) along the list.
+- **DotPlot** : the terms are split into activated (NES \> 0) and suppressed (NES \< 0). The x-axis (`GeneRatio`) is the fraction of the term's genes that belong to the leading edge. The size of the dots is the number of leading-edge genes and the colour is the adjusted p-value.
+- **Running Enrichment Score** (most significant term) :
+  - top panel : the running ES along the ranked list. The peak (or the trough) gives the ES.
+  - middle panel : each vertical bar is a gene of the term. Bars concentrated on the left mean activation, bars on the right mean suppression.
+  - bottom panel : the value of the ranking statistic (`avg_log2FC`) along the list.
 
 ```{r}
 #| fig-width: 11
@@ -423,8 +418,8 @@ if (!is.null(gse_res) && nrow(gse_res@result) > 0) {
 
 Be aware:
 
--   we compare the target cluster to **all the other cells**, which form a heterogeneous mixture of cell types. A "suppressed" term (e.g. cell division) does not mean the process is switched off. It means that it is **less** active than in the other clusters on average (here, the cycling progenitors).
--   GO terms are highly redundant (e.g. *nuclear division*, *mitotic nuclear division*, *chromosome segregation*): several significant terms often reflect the same set of genes. As for ORA, `simplify(gse_res, cutoff = 0.7)` can be used to merge them.
+- we compare the target cluster to **all the other cells**, which form a heterogeneous mixture of cell types. A "suppressed" term (e.g. cell division) does not mean the process is switched off. It means that it is **less** active than in the other clusters on average (here, the cycling progenitors).
+- GO terms are highly redundant (e.g. *nuclear division*, *mitotic nuclear division*, *chromosome segregation*): several significant terms often reflect the same set of genes. As for ORA, `simplify(gse_res, cutoff = 0.7)` can be used to merge them.
 
 # Save
 
