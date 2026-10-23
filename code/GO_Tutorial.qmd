@@ -105,6 +105,7 @@ if (file.exists(sobj_cache_file) && file.exists(de_cache_file)) {
   sobj$percent_mt <- PercentageFeatureSet(sobj, pattern = "^mt-")
   p_qc <- VlnPlot(sobj, features = c("nFeature_RNA", "nCount_RNA", "percent_mt"), ncol = 3, pt.size = 0)
   ggsave(file.path(plot_dir, "01_QC_violin_raw.png"), plot = p_qc, width = 10, height = 5, dpi = 300)
+  print(p_qc)
 
   sobj_filtrd <- subset(sobj, subset = nFeature_RNA > QC_MIN_GENE & nCount_RNA > QC_MIN_UMI & percent_mt < QC_MAX_MITO_PCT)
   rm(sobj); invisible(gc())
@@ -145,6 +146,7 @@ if (file.exists(sobj_cache_file) && file.exists(de_cache_file)) {
 p_umap <- DimPlot(sobj_filtrd, reduction = "umap", label = TRUE, pt.size = 0.3) +
   ggtitle(paste0("UMAP - E18 Mouse Brain Clusters (res = ", CLUSTER_RES, ")"))
 ggsave(file.path(plot_dir, "02_UMAP_clusters.png"), plot = p_umap, width = 7, height = 5, dpi = 300)
+print(p_umap)
 
 marker_genes <- list(
   Radial_glia     = c("Pax6", "Sox2", "Hes5", "Fabp7", "Nes"),
@@ -166,10 +168,12 @@ p_dot_markers <- DotPlot(sobj_filtrd, features = marker_genes) +
         strip.text  = element_text(angle = 45, hjust = 0.5),
         plot.background = element_rect(fill = "white", color = NA))
 ggsave(file.path(plot_dir, "03_DotPlot_canonical_markers.png"), plot = p_dot_markers, width = 14, height = 6, dpi = 300)
+print(p_dot_markers)
 
 top.DE <- result.DE %>% group_by(cluster) %>% slice_max(order_by = avg_log2FC, n = 5)
 p_heatmap <- DoHeatmap(sobj_filtrd, slot = "data", features = unique(top.DE$gene), size = 3)
 ggsave(file.path(plot_dir, "04_Heatmap_topDE.png"), plot = p_heatmap, width = 12, height = 8, dpi = 300)
+print(p_heatmap)
 ```
 
 ### Cluster Annotation Checkpoint
@@ -259,11 +263,13 @@ if (!is.null(ego_ora) && nrow(ego_ora@result %>% filter(p.adjust < 0.05)) > 0) {
   p_ora_dot <- dotplot(ego_ora_simp, showCategory = 15) +
     ggtitle(paste("ORA -", ORA_ONTOLOGY, "(Cluster", target_cluster, "-", ORA_DIRECTION, ")"))
   ggsave(file.path(plot_dir, "05_ORA_dotplot.png"), plot = p_ora_dot, width = 9, height = 7, dpi = 300)
+  print(p_ora_dot)
 
   ego_ora_simp <- pairwise_termsim(ego_ora_simp)
   p_ora_emap <- emapplot(ego_ora_simp, showCategory = 15) +
     ggtitle(paste("ORA Functional Network (Cluster", target_cluster, "-", ORA_DIRECTION, ")"))
   ggsave(file.path(plot_dir, "06_ORA_emapplot.png"), plot = p_ora_emap, width = 9, height = 8, dpi = 300, bg = "white")
+  print(p_ora_emap)
   
 } else {
   warning("No significant GO terms found via ORA for cluster ", target_cluster, " (Direction: ", ORA_DIRECTION, ")")
@@ -280,13 +286,11 @@ The **Enrichment Map** (*06_ORA_emapplot.png*): This network connects GO terms t
 
 ### Exercise:
 
-### Exercise:
+*Q1 :* In the code above, the target_cluster parameter is set to "0". Look at the annotation plot *03_DotPlot_canonical_markers.png*: this cluster strongly expresses markers for immature neurons (Dcx, Stmn2) and excitatory neurons (Satb2). Do the Biological Processes (BP) that emerge on your *ORA plot* confirm this neuronal identity?
 
-*Q1 :* In the code above, the target_cluster parameter is set to "0". Look at the annotation plot *03_DotPlot_canonical_markers.png*: this cluster strongly expresses markers for immature neurons (Dcx, Stmn2, Neurod2, Neurod6) and excitatory neurons (Satb2). Do the Biological Processes (BP) that emerge on your ORA plot confirm this manually deduced identity?
+*Q2 :* Change the `ORA_ONTOLOGY` parameter to "CC" (Cellular Component) and re-run the code block. Are the resulting terms (e.g., synapse, axon, or growth cone) consistent with the physical structure of a neuron?
 
-*Q2 :* Change the `ORA_ONTOLOGY` parameter to "CC" (Cellular Component) and re-run the code block. Since *Cluster 0* appears to be composed of differentiating neurons, are the resulting terms (e.g., synapse, axon, or growth cone) consistent with the expected physical location of these proteins?
-
-*Q3 :* Try changing the `ORA_DIRECTION` parameter to `"DOWN"` to study the genes that *Cluster 0* has repressed. Look at the DotPlot again: clusters like *Cluster 2* strongly express markers for radial glia (Pax6, Sox2) and the cell cycle (Mki67, Top2a, Pcna). Do you find terms related to cell division or stem cell maintenance among the functions that our Cluster 0 had to "turn off" to commit to its neuronal state?
+*Q3 :* Try changing the `ORA_DIRECTION` parameter to `"DOWN"` and re-run the code to see which pathways Cluster 0 has repressed. To become a neuron, this cell had to permanently stop dividing. Do you see terms like "cell cycle" or "DNA replication" appearing in this suppressed list?
 
 ## Gene Set Enrichment Analysis (GSEA)
 
@@ -294,12 +298,12 @@ The **Enrichment Map** (*06_ORA_emapplot.png*): This network connects GO terms t
 
 The principle :
 
-- genes are ranked by a statistic (here the `avg_log2FC` of the target cluster against all the other cells)
-- for each GO term, we walk down the ranked list. A running *Enrichment Score* (ES) goes up each time we meet a gene of the term and goes down otherwise. The ES is the maximum deviation from zero.
-- the ES is normalized for the size of the gene set, which gives the **NES** (*Normalized Enrichment Score*)
-  - NES \> 0 : the genes of the term are at the top of the list (**activated** in the target cluster)
-  - NES \< 0 : the genes of the term are at the bottom of the list (**suppressed** in the target cluster)
-- the significance is estimated by permutations (`fgsea` algorithm), then corrected for multiple testing (Benjamini-Hochberg)
+-   genes are ranked by a statistic (here the `avg_log2FC` of the target cluster against all the other cells)
+-   for each GO term, we walk down the ranked list. A running *Enrichment Score* (ES) goes up each time we meet a gene of the term and goes down otherwise. The ES is the maximum deviation from zero.
+-   the ES is normalized for the size of the gene set, which gives the **NES** (*Normalized Enrichment Score*)
+    -   NES \> 0 : the genes of the term are at the top of the list (**activated** in the target cluster)
+    -   NES \< 0 : the genes of the term are at the bottom of the list (**suppressed** in the target cluster)
+-   the significance is estimated by permutations (`fgsea` algorithm), then corrected for multiple testing (Benjamini-Hochberg)
 
 We use the function `gseGO` from the `clusterProfiler` package (https://yulab-smu.top/biomedical-knowledge-mining-book/).
 
@@ -349,12 +353,12 @@ Be aware: the ranking statistic is a choice. `avg_log2FC` measures the size of t
 
 The main parameters :
 
-- `ont = "BP"` : we test the *Biological Process* ontology (alternatives : `"MF"`, `"CC"` or `"ALL"`)
-- `keyType = "SYMBOL"` : our genes are named by their symbols (the rownames of the Seurat object)
-- `minGSSize = 15`, `maxGSSize = 500` : very small terms are unstable and very large terms are too general to interpret, so both are excluded
-- `pvalueCutoff = 0.05` : threshold applied to the **adjusted** p-value (`pAdjustMethod = "BH"`)
-- `eps = 0` : the p-values are estimated exactly, even very small ones (by default they are bounded at 1e-10)
-- `nPermSimple` : number of permutations of the first step of `fgsea` (1000 by default). Only increase it (e.g. 10000) if `fgsea` warns about *"unbalanced gene-level statistic values"*.
+-   `ont = "BP"` : we test the *Biological Process* ontology (alternatives : `"MF"`, `"CC"` or `"ALL"`)
+-   `keyType = "SYMBOL"` : our genes are named by their symbols (the rownames of the Seurat object)
+-   `minGSSize = 15`, `maxGSSize = 500` : very small terms are unstable and very large terms are too general to interpret, so both are excluded
+-   `pvalueCutoff = 0.05` : threshold applied to the **adjusted** p-value (`pAdjustMethod = "BH"`)
+-   `eps = 0` : the p-values are estimated exactly, even very small ones (by default they are bounded at 1e-10)
+-   `nPermSimple` : number of permutations of the first step of `fgsea` (1000 by default). Only increase it (e.g. 10000) if `fgsea` warns about *"unbalanced gene-level statistic values"*.
 
 The test is based on random permutations, so we fix the seed for reproducibility.
 
@@ -382,18 +386,18 @@ table(ifelse(gse_res@result$NES > 0, "activated", "suppressed"))
 
 The results are stored in `gse_res@result`. In particular :
 
-- `setSize` : number of genes of the term found in our ranked list
-- `NES` : normalized enrichment score (its sign gives the direction)
-- `p.adjust` : BH-adjusted p-value
-- `core_enrichment` : the *leading edge*, i.e. the genes that contribute the most to the enrichment score. These are the genes to look at to interpret a term.
+-   `setSize` : number of genes of the term found in our ranked list
+-   `NES` : normalized enrichment score (its sign gives the direction)
+-   `p.adjust` : BH-adjusted p-value
+-   `core_enrichment` : the *leading edge*, i.e. the genes that contribute the most to the enrichment score. These are the genes to look at to interpret a term.
 
 ### Visualisation
 
-- **DotPlot** : the terms are split into activated (NES \> 0) and suppressed (NES \< 0). The x-axis (`GeneRatio`) is the fraction of the term's genes that belong to the leading edge. The size of the dots is the number of leading-edge genes and the colour is the adjusted p-value.
-- **Running Enrichment Score** (most significant term) :
-  - top panel : the running ES along the ranked list. The peak (or the trough) gives the ES.
-  - middle panel : each vertical bar is a gene of the term. Bars concentrated on the left mean activation, bars on the right mean suppression.
-  - bottom panel : the value of the ranking statistic (`avg_log2FC`) along the list.
+-   **DotPlot** : the terms are split into activated (NES \> 0) and suppressed (NES \< 0). The x-axis (`GeneRatio`) is the fraction of the term's genes that belong to the leading edge. The size of the dots is the number of leading-edge genes and the colour is the adjusted p-value.
+-   **Running Enrichment Score** (most significant term) :
+    -   top panel : the running ES along the ranked list. The peak (or the trough) gives the ES.
+    -   middle panel : each vertical bar is a gene of the term. Bars concentrated on the left mean activation, bars on the right mean suppression.
+    -   bottom panel : the value of the ranking statistic (`avg_log2FC`) along the list.
 
 ```{r}
 #| fig-width: 11
@@ -418,8 +422,8 @@ if (!is.null(gse_res) && nrow(gse_res@result) > 0) {
 
 Be aware:
 
-- we compare the target cluster to **all the other cells**, which form a heterogeneous mixture of cell types. A "suppressed" term (e.g. cell division) does not mean the process is switched off. It means that it is **less** active than in the other clusters on average (here, the cycling progenitors).
-- GO terms are highly redundant (e.g. *nuclear division*, *mitotic nuclear division*, *chromosome segregation*): several significant terms often reflect the same set of genes. As for ORA, `simplify(gse_res, cutoff = 0.7)` can be used to merge them.
+-   we compare the target cluster to **all the other cells**, which form a heterogeneous mixture of cell types. A "suppressed" term (e.g. cell division) does not mean the process is switched off. It means that it is **less** active than in the other clusters on average (here, the cycling progenitors).
+-   GO terms are highly redundant (e.g. *nuclear division*, *mitotic nuclear division*, *chromosome segregation*): several significant terms often reflect the same set of genes. As for ORA, `simplify(gse_res, cutoff = 0.7)` can be used to merge them.
 
 # Save
 
